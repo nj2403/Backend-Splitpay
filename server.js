@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 4000;
 
 // Replace with your real frontend domains
 const ALLOWED_ORIGINS = [
-  "https://https://splitpay.fun/",
+  "https://splitpay.fun/",
   "https://www.yourdomain.com",
   "http://localhost:5500",
   "http://127.0.0.1:5500"
