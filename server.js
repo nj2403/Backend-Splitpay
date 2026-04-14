@@ -6,10 +6,9 @@ const Database = require("better-sqlite3");
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// Replace with your real frontend domains
 const ALLOWED_ORIGINS = [
-  "https://splitpay.fun/",
-  "https://www.yourdomain.com",
+  "https://splitpay.fun",
+  "https://www.splitpay.fun",
   "http://localhost:5500",
   "http://127.0.0.1:5500"
 ];
@@ -19,10 +18,14 @@ app.use(
     origin(origin, callback) {
       if (!origin) return callback(null, true);
       if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-      return callback(new Error("CORS not allowed for this origin"));
-    }
+      return callback(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"]
   })
 );
+
+app.options("*", cors());
 
 app.use(express.json());
 
