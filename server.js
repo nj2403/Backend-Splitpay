@@ -28,7 +28,8 @@ app.use(
 app.options("*", cors());
 app.use(express.json());
 
-const dbPath = path.join(__dirname, "splitpay.db");
+// Use a fresh DB filename to avoid old schema conflicts
+const dbPath = path.join(__dirname, "splitpay_v2.db");
 const db = new Database(dbPath);
 
 // =========================
@@ -41,8 +42,8 @@ db.exec(`
     merchant_vpa TEXT NOT NULL,
     original_qr_payload TEXT NOT NULL,
     total_amount REAL NOT NULL,
-    leader_name TEXT,
-    leader_vpa TEXT,
+    leader_name TEXT NOT NULL,
+    leader_vpa TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL
   );
@@ -58,6 +59,7 @@ db.exec(`
     transaction_ref TEXT,
     paid_at TEXT,
     confirmed_at TEXT,
+    created_at TEXT NOT NULL,
     FOREIGN KEY (room_id) REFERENCES rooms(id)
   );
 
@@ -86,11 +88,17 @@ function generateId(length = 12) {
   return result;
 }
 
+function validateUpiId(vpa) {
+  return typeof vpa === "string" && vpa.includes("@") && vpa.trim().length >= 5;
+}
+
 function getRoomWithMembers(roomId) {
   const room = db.prepare(`SELECT * FROM rooms WHERE id = ?`).get(roomId);
   if (!room) return null;
 
-  const members = db.prepare(`SELECT * FROM members WHERE room_id = ? ORDER BY created_at ASC`).all(roomId);
+  const members = db
+    .prepare(`SELECT * FROM members WHERE room_id = ? ORDER BY created_at ASC`)
+    .all(roomId);
 
   const totalPaid = members
     .filter((m) => m.status === "paid")
@@ -108,10 +116,6 @@ function getRoomWithMembers(roomId) {
     remainingAmount: Math.max(Number(room.total_amount) - totalPaid, 0),
     members
   };
-}
-
-function validateUpiId(vpa) {
-  return typeof vpa === "string" && vpa.includes("@") && vpa.length >= 5;
 }
 
 // =========================
@@ -179,7 +183,9 @@ app.post("/rooms", (req, res) => {
     );
 
     if (invalidMember) {
-      return res.status(400).json({ error: "Each member must have a valid name and share amount" });
+      return res.status(400).json({
+        error: "Each member must have a valid name and share amount"
+      });
     }
 
     const roomId = generateId(10);
@@ -200,7 +206,7 @@ app.post("/rooms", (req, res) => {
     `).run(
       roomId,
       merchantName || null,
-      merchantVpa,
+      merchantVpa.trim(),
       originalQrPayload,
       Number(totalAmount),
       String(leaderName).trim(),
@@ -221,13 +227,6 @@ app.post("/rooms", (req, res) => {
       ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?)
     `);
 
-    // Add created_at if column missing from old DB
-    try {
-      db.prepare(`SELECT created_at FROM members LIMIT 1`).get();
-    } catch {
-      db.exec(`ALTER TABLE members ADD COLUMN created_at TEXT`);
-    }
-
     const transaction = db.transaction((memberList) => {
       memberList.forEach((member) => {
         insertMember.run(
@@ -245,8 +244,8 @@ app.post("/rooms", (req, res) => {
 
     return res.status(201).json(getRoomWithMembers(roomId));
   } catch (error) {
-    console.error("Create room error:", error);
-    return res.status(500).json({ error: "Failed to create room" });
+    console.error("🔥 CREATE ROOM ERROR:", error);
+    return res.status(500).json({ error: error.message || "Failed to create room" });
   }
 });
 
@@ -254,23 +253,27 @@ app.post("/rooms", (req, res) => {
 app.get("/rooms/:roomId", (req, res) => {
   try {
     const room = getRoomWithMembers(req.params.roomId);
+
     if (!room) {
       return res.status(404).json({ error: "Room not found" });
     }
+
     return res.json(room);
   } catch (error) {
-    console.error("Get room error:", error);
-    return res.status(500).json({ error: "Failed to fetch room" });
+    console.error("GET ROOM ERROR:", error);
+    return res.status(500).json({ error: error.message || "Failed to fetch room" });
   }
 });
 
-// Create UPI intent for member -> leader collection
+// Member -> leader payment intent
 app.post("/payments/create-intent", (req, res) => {
   try {
     const { roomId, memberId } = req.body;
 
     const room = db.prepare(`SELECT * FROM rooms WHERE id = ?`).get(roomId);
-    const member = db.prepare(`SELECT * FROM members WHERE id = ? AND room_id = ?`).get(memberId, roomId);
+    const member = db
+      .prepare(`SELECT * FROM members WHERE id = ? AND room_id = ?`)
+      .get(memberId, roomId);
 
     if (!room || !member) {
       return res.status(404).json({ error: "Room or member not found" });
@@ -278,6 +281,7 @@ app.post("/payments/create-intent", (req, res) => {
 
     const attemptId = generateId(12);
     const txnRef = `SP${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
     const note = encodeURIComponent(`SplitPay ${roomId} ${member.name}`);
     const payeeName = encodeURIComponent(room.leader_name || "Leader");
     const payeeVpa = encodeURIComponent(room.leader_vpa);
@@ -319,12 +323,12 @@ app.post("/payments/create-intent", (req, res) => {
       leaderName: room.leader_name
     });
   } catch (error) {
-    console.error("Create intent error:", error);
-    return res.status(500).json({ error: "Failed to create payment intent" });
+    console.error("CREATE INTENT ERROR:", error);
+    return res.status(500).json({ error: error.message || "Failed to create payment intent" });
   }
 });
 
-// Member says "I have paid"
+// Member clicks "I have paid"
 app.post("/payments/member-confirm", (req, res) => {
   try {
     const { roomId, memberId } = req.body;
@@ -333,10 +337,9 @@ app.post("/payments/member-confirm", (req, res) => {
       return res.status(400).json({ error: "roomId and memberId are required" });
     }
 
-    const member = db.prepare(`
-      SELECT * FROM members
-      WHERE id = ? AND room_id = ?
-    `).get(memberId, roomId);
+    const member = db
+      .prepare(`SELECT * FROM members WHERE id = ? AND room_id = ?`)
+      .get(memberId, roomId);
 
     if (!member) {
       return res.status(404).json({ error: "Member not found" });
@@ -354,12 +357,14 @@ app.post("/payments/member-confirm", (req, res) => {
       message: "Marked for leader verification"
     });
   } catch (error) {
-    console.error("Member confirm error:", error);
-    return res.status(500).json({ error: "Failed to mark payment for verification" });
+    console.error("MEMBER CONFIRM ERROR:", error);
+    return res.status(500).json({
+      error: error.message || "Failed to mark payment for verification"
+    });
   }
 });
 
-// Leader verifies member collection
+// Leader approves or rejects
 app.post("/payments/leader-verify", (req, res) => {
   try {
     const { roomId, memberId, status } = req.body;
@@ -372,10 +377,9 @@ app.post("/payments/leader-verify", (req, res) => {
       return res.status(400).json({ error: "Status must be either paid or failed" });
     }
 
-    const member = db.prepare(`
-      SELECT * FROM members
-      WHERE id = ? AND room_id = ?
-    `).get(memberId, roomId);
+    const member = db
+      .prepare(`SELECT * FROM members WHERE id = ? AND room_id = ?`)
+      .get(memberId, roomId);
 
     if (!member) {
       return res.status(404).json({ error: "Member not found" });
@@ -388,11 +392,7 @@ app.post("/payments/leader-verify", (req, res) => {
             paid_amount = ?,
             paid_at = ?
         WHERE id = ?
-      `).run(
-        Number(member.share_amount),
-        new Date().toISOString(),
-        memberId
-      );
+      `).run(Number(member.share_amount), new Date().toISOString(), memberId);
     } else {
       db.prepare(`
         UPDATE members
@@ -406,20 +406,21 @@ app.post("/payments/leader-verify", (req, res) => {
       room: getRoomWithMembers(roomId)
     });
   } catch (error) {
-    console.error("Leader verify error:", error);
-    return res.status(500).json({ error: "Failed to verify member payment" });
+    console.error("LEADER VERIFY ERROR:", error);
+    return res.status(500).json({
+      error: error.message || "Failed to verify member payment"
+    });
   }
 });
 
-// Optional manual confirm endpoint if you still want it
+// Optional manual confirm endpoint
 app.post("/payments/confirm", (req, res) => {
   try {
     const { roomId, memberId, paidAmount, transactionRef } = req.body;
 
-    const member = db.prepare(`
-      SELECT * FROM members
-      WHERE id = ? AND room_id = ?
-    `).get(memberId, roomId);
+    const member = db
+      .prepare(`SELECT * FROM members WHERE id = ? AND room_id = ?`)
+      .get(memberId, roomId);
 
     if (!member) {
       return res.status(404).json({ error: "Member not found" });
@@ -447,20 +448,19 @@ app.post("/payments/confirm", (req, res) => {
 
     return res.json(getRoomWithMembers(roomId));
   } catch (error) {
-    console.error("Confirm payment error:", error);
-    return res.status(500).json({ error: "Failed to confirm payment" });
+    console.error("CONFIRM PAYMENT ERROR:", error);
+    return res.status(500).json({ error: error.message || "Failed to confirm payment" });
   }
 });
 
-// Optional fail endpoint
+// Optional manual fail endpoint
 app.post("/payments/fail", (req, res) => {
   try {
     const { roomId, memberId } = req.body;
 
-    const member = db.prepare(`
-      SELECT * FROM members
-      WHERE id = ? AND room_id = ?
-    `).get(memberId, roomId);
+    const member = db
+      .prepare(`SELECT * FROM members WHERE id = ? AND room_id = ?`)
+      .get(memberId, roomId);
 
     if (!member) {
       return res.status(404).json({ error: "Member not found" });
@@ -480,8 +480,8 @@ app.post("/payments/fail", (req, res) => {
 
     return res.json(getRoomWithMembers(roomId));
   } catch (error) {
-    console.error("Fail payment error:", error);
-    return res.status(500).json({ error: "Failed to mark payment failed" });
+    console.error("FAIL PAYMENT ERROR:", error);
+    return res.status(500).json({ error: error.message || "Failed to mark payment failed" });
   }
 });
 
@@ -489,7 +489,7 @@ app.post("/payments/fail", (req, res) => {
 // ERROR HANDLER
 // =========================
 app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
+  console.error("UNHANDLED ERROR:", err);
   return res.status(500).json({
     error: err.message || "Internal server error"
   });
