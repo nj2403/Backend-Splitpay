@@ -4,7 +4,6 @@ const cors = require("cors");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Allow your site + Android WebView + local testing
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
@@ -13,7 +12,6 @@ app.use(cors({
 
 app.use(express.json());
 
-// In-memory MVP storage
 const rooms = {};
 
 function generateId(prefix = "room") {
@@ -26,7 +24,7 @@ function validateUpiId(vpa) {
 
 function normalizeRoom(room) {
   const totalPaid = room.members
-    .filter((m) => m.status === "paid")
+    .filter(m => m.status === "paid")
     .reduce((sum, m) => sum + Number(m.paid_amount || m.share_amount || 0), 0);
 
   return {
@@ -36,19 +34,22 @@ function normalizeRoom(room) {
   };
 }
 
-// Health
-app.get("/health", (req, res) => {
+app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "Split Pay backend is running"
+    message: "SplitPay backend root working"
   });
 });
 
-// Create room
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    message: "SplitPay backend is running"
+  });
+});
+
 app.post("/rooms", (req, res) => {
   try {
-    console.log("POST /rooms body:", req.body);
-
     const {
       merchantName,
       merchantVpa,
@@ -79,11 +80,11 @@ app.post("/rooms", (req, res) => {
       return res.status(400).json({ error: "At least one member is required" });
     }
 
-    const cleanMembers = members.map((m) => ({
+    const cleanMembers = members.map(m => ({
       id: generateId("member"),
       name: String(m.name || "Person").trim(),
       phone: m.phone ? String(m.phone).trim() : "",
-      share_amount: Number(m.shareAmount || 0),
+      share_amount: Number(m.shareAmount || m.share_amount || 0),
       paid_amount: 0,
       status: "pending",
       transaction_ref: null,
@@ -91,12 +92,14 @@ app.post("/rooms", (req, res) => {
       confirmed_at: null
     }));
 
-    const invalid = cleanMembers.find(
-      (m) => !m.name || Number.isNaN(m.share_amount) || m.share_amount <= 0
+    const invalidMember = cleanMembers.find(
+      m => !m.name || Number.isNaN(m.share_amount) || m.share_amount <= 0
     );
 
-    if (invalid) {
-      return res.status(400).json({ error: "Each member must have valid name and share amount" });
+    if (invalidMember) {
+      return res.status(400).json({
+        error: "Each member must have valid name and share amount"
+      });
     }
 
     const roomId = generateId("room");
@@ -120,14 +123,16 @@ app.post("/rooms", (req, res) => {
     return res.status(201).json(normalizeRoom(room));
   } catch (error) {
     console.error("CREATE ROOM ERROR:", error);
-    return res.status(500).json({ error: error.message || "Failed to create room" });
+    return res.status(500).json({
+      error: error.message || "Failed to create room"
+    });
   }
 });
 
-// Get room
 app.get("/rooms/:roomId", (req, res) => {
   try {
     const room = rooms[req.params.roomId];
+
     if (!room) {
       return res.status(404).json({ error: "Room not found" });
     }
@@ -135,30 +140,36 @@ app.get("/rooms/:roomId", (req, res) => {
     return res.json(normalizeRoom(room));
   } catch (error) {
     console.error("GET ROOM ERROR:", error);
-    return res.status(500).json({ error: error.message || "Failed to fetch room" });
+    return res.status(500).json({
+      error: error.message || "Failed to fetch room"
+    });
   }
 });
 
-// Member marks "I have paid"
 app.post("/payments/member-confirm", (req, res) => {
   try {
-    const { roomId, memberId } = req.body || {};
+    const { roomId, memberId, transactionRef } = req.body || {};
 
     if (!roomId || !memberId) {
-      return res.status(400).json({ error: "roomId and memberId are required" });
+      return res.status(400).json({
+        error: "roomId and memberId are required"
+      });
     }
 
     const room = rooms[roomId];
+
     if (!room) {
       return res.status(404).json({ error: "Room not found" });
     }
 
-    const member = room.members.find((m) => m.id === memberId);
+    const member = room.members.find(m => m.id === memberId);
+
     if (!member) {
       return res.status(404).json({ error: "Member not found" });
     }
 
     member.status = "pending_verification";
+    member.transaction_ref = transactionRef || null;
     member.confirmed_at = new Date().toISOString();
 
     return res.json({
@@ -168,29 +179,36 @@ app.post("/payments/member-confirm", (req, res) => {
     });
   } catch (error) {
     console.error("MEMBER CONFIRM ERROR:", error);
-    return res.status(500).json({ error: error.message || "Failed to mark payment" });
+    return res.status(500).json({
+      error: error.message || "Failed to mark payment"
+    });
   }
 });
 
-// Leader verifies member payment
 app.post("/payments/leader-verify", (req, res) => {
   try {
     const { roomId, memberId, status } = req.body || {};
 
     if (!roomId || !memberId || !status) {
-      return res.status(400).json({ error: "roomId, memberId and status are required" });
+      return res.status(400).json({
+        error: "roomId, memberId and status are required"
+      });
     }
 
     if (!["paid", "failed"].includes(status)) {
-      return res.status(400).json({ error: "Status must be paid or failed" });
+      return res.status(400).json({
+        error: "Status must be paid or failed"
+      });
     }
 
     const room = rooms[roomId];
+
     if (!room) {
       return res.status(404).json({ error: "Room not found" });
     }
 
-    const member = room.members.find((m) => m.id === memberId);
+    const member = room.members.find(m => m.id === memberId);
+
     if (!member) {
       return res.status(404).json({ error: "Member not found" });
     }
@@ -203,24 +221,24 @@ app.post("/payments/leader-verify", (req, res) => {
       member.status = "failed";
     }
 
+    const normalized = normalizeRoom(room);
+
+    if (normalized.remainingAmount <= 0) {
+      room.status = "completed";
+    }
+
     return res.json({
       success: true,
       room: normalizeRoom(room)
     });
   } catch (error) {
     console.error("LEADER VERIFY ERROR:", error);
-    return res.status(500).json({ error: error.message || "Failed to verify payment" });
+    return res.status(500).json({
+      error: error.message || "Failed to verify payment"
+    });
   }
 });
 
-// Optional root route
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "Split Pay backend root is working"
-  });
-});
-
 app.listen(PORT, () => {
-  console.log(`Split Pay backend running on port ${PORT}`);
+  console.log(`SplitPay backend running on port ${PORT}`);
 });
